@@ -45,15 +45,23 @@
  * This code comes with no warranties. Use at your own risk etc.
  */
 
-#include <SoftwareSerial.h>
+//#include <SoftwareSerial.h>
 
-SoftwareSerial mySerial(10, 11); // RX, TX
+//SoftwareSerial Serial1(10, 11); // RX, TX
+
 
 
 // Defines used for the variables within the web pages
 #define NUMBER_OF_VARIABLES 7
 #define STRLEN_OF_VARIABLES 16
 #define NUMBER_OF_PAGE_ARRAY_ELEMENTS 3
+
+typedef enum  RequestState
+{
+  waiting,
+  readingLine1,
+  readingJunk
+} ;
 
 
 // Data of the web pages and their page names, are stored in PROGMEM
@@ -65,14 +73,20 @@ SoftwareSerial mySerial(10, 11); // RX, TX
 #define PAGE_DATA_INDEX 1
 #define PAGE_MIMETYPE_INDEX 2
 
-prog_char index_htm[] PROGMEM = "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"s.css\"></head>" 
+// Use this in the head block if you want to test using a CSS file with your html file
+// <link rel=\"stylesheet\" type=\"text/css\" href=\"s.css\">
+// to test repeadly loading the page use <meta http-equiv=\"refresh\" content=\"5\">
+prog_char index_htm[] PROGMEM = "<!DOCTYPE html><html>"
+                              "<head>"
+                             // "<link rel=\"stylesheet\" type=\"text/css\" href=\"s.css\">"
+                             // "<meta http-equiv=\"refresh\" content=\"5\">"
+                              "</head>" 
                               "<body><h3>Millis are \a0\a</h3>"
-                              "<h3>Analog A0 = \a1\a <meter min=\"0\" max=\"1023\" value=\"\a1\a\"></meter><h3>"
-                              "<h3>Analog A1 = \a2\a<h3>"
-                              "<h3>Analog A2 = \a3\a<h3>"
-                              "<h3>Analog A3 = \a4\a<h3>"   
-                              "<h3>Analog A4 = \a5\a<h3>"                                    
-                              "<body>";// This is the page data
+                              "<h3>Analog A0 = \a1\a <meter min=\"0\" max=\"1023\" value=\"\a1\a\"></meter></h3>"
+                              "<h3>Analog A1 = \a2\a</h3>"
+                              "<h3>Analog A2 = \a3\a</h3>"
+                              "<h3>Analog A3 = \a4\a</h3>"   
+                              "</body>";// This is the page data
 prog_char index_pageName[] PROGMEM =  "index.htm";// This is the page name
 
 // Same as index page except with meta refresh every 5 seconds to soak test the comms etc
@@ -110,6 +124,10 @@ PROGMEM const char *pages[][NUMBER_OF_PAGE_ARRAY_ELEMENTS] =
   {jsondata_pagename,jsondata_json,mimetype_application_json}
 };
 
+int RXLED = 17;  // The RX LED has a defined Arduino pin
+boolean flashState;
+long lastMillis;
+RequestState requestState=waiting;
 
 /*
  * This function has 2 uses
@@ -270,6 +288,7 @@ void sendPageResponse(char *requestLine1,Stream *serialPort)
   serialPort->println(buildPage(foundPage,variables),DEC);// pre build the page so we know its overall length including the variable substitution
   serialPort->println();
   buildPage(foundPage,variables,serialPort);// Send the actual page data including variable substitution
+  Serial.print("Senresponse");
 }
 
 // Helper function. sends a PROGMEM String to the serial port (Used to send the mimetype)
@@ -288,6 +307,7 @@ char c;
 boolean waitPattern(char *receiveBuffer, int receiveBufferLen, char *thePattern,Stream *inStream)
 {
 char *patternPos = thePattern;
+char c;
 
     receiveBufferLen--;// Allow space for zero termination
     
@@ -295,8 +315,12 @@ char *patternPos = thePattern;
     {
       if  (inStream->available() && receiveBufferLen-->0)
       {
-        *receiveBuffer=inStream->read();
-        if (*receiveBuffer++==*patternPos)
+        c=inStream->read();
+        if (receiveBuffer)
+        {
+          *receiveBuffer++=c;
+        }
+        if (c==*patternPos)
         {
           patternPos++;
         }
@@ -305,9 +329,11 @@ char *patternPos = thePattern;
           patternPos = thePattern;// reset the pattern position pointer back to the start of the pattern
         }
       }
+      
+      handleFlashLED();
     }
     
-    if (*patternPos==0)
+    if (*patternPos==0 && receiveBuffer)
     {
       *receiveBuffer=0;// terminate receive buffer
       return true; // found the pattern
@@ -318,6 +344,23 @@ char *patternPos = thePattern;
     }
 }
 
+void handleFlashLED()
+{
+     if (millis() - lastMillis > 500)
+     {
+        lastMillis=millis();
+        flashState = !flashState;
+        digitalWrite(RXLED, flashState);   // set the LED on
+/*
+#if defined(USART1_RX_vect)
+Serial.println("USART1_RX_vect");
+#endif
+*/
+     }
+}
+
+
+
 
 void setup() 
 {
@@ -325,33 +368,69 @@ char buf[64];// Assume the HTTP request doesnt have any single line greater than
 
 // initialize both serial ports:
   Serial.begin(115200);// Debug to PC
-  mySerial.begin(38400);// This is serial port for the module
- 
+  Serial1.begin(115200);// This is serial port for the module
+   Serial1.flush();
+  pinMode(RXLED, OUTPUT);  // Set RX LED as an output
+  flashState=LOW;
+  digitalWrite(RXLED, flashState);   // set the LED on
+  
+  pinMode(2,OUTPUT);
+  digitalWrite(2,LOW);
+  delay(10);
+  digitalWrite(2,HIGH);
+  lastMillis=millis();
+  
+
+  
+
   Serial.println(F("Starting web server"));// Debug message
 
    while(1)
    {
-     if (waitPattern(buf,sizeof(buf),"\r\n",&mySerial))// Assume that the request is a GET and its the first bit of data we receive
+    
+     if (waitPattern(buf,sizeof(buf),"\r\n",&Serial1))// Assume that the request is a GET and its the first bit of data we receive
      {
       // Serial.print(F("Got buffer "));// Debug message
       // Serial.print(buf);// Debug message
       // Serial.print(F("Flushing "));// Debug message
         // Check if this is a GET request
+        
+        waitPattern((char *)0,999999,"\r\n\r\n",&Serial1);// purge all other incomming data from the browser until \r\n\r\n
+        
         if (!strncmp(buf,"GET",3))
         {
           // Yes. Its a GET
-           // Serial.print(F("Got buffer "));
-            sendPageResponse(buf,&mySerial);// Send response specific to the GET reuest
-            mySerial.flush(); // flush both input an output. Mainly flushing the input, in case the module has not finished sending all data from the browser (client) before we finish sending the page back. (Probably not needed)
+        //  Serial.print("GET");
+         //   Serial.println(buf);
+           
+
+            // flush the rest of the input buffer
+            while(Serial1.available() && true)
+            {
+              Serial1.read();
+            }
+            Serial1.flush(); // flush both input an output. Mainly flushing the input, in case the module has not finished sending all data from the browser (client) before we finish sending the page back. (Probably not needed)
+
+            sendPageResponse(buf,&Serial1);// Send response specific to the GET reuest
+
+
         }
      }  
    }
 
 }
 
+void serialEvent1()
+{
+  Serial.println("serial1Event");
+}
+void serialEvent()
+{
+  Serial.print("serialEvent");
+}
+
 void loop() {
   // Everything is done in setup ! Its probably faster !
 }
-
 
 
